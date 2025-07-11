@@ -20,21 +20,43 @@ pub fn make_storage<T, const N: usize>() -> [MaybeUninit<T>; N] {
 pub struct StackCheckPoint<T>(*mut T);
 
 /*──────────────────── stack type ───────────────────────*/
-/// This struct is supposed to be used when a stack in the traditional sense is needed.
-/// It is slightly more effishent to grow down on some arches and for some ops.
-/// Note that it does not deref the internal slice and thus it is sound to alias internal memory
+/// A down-growing, fixed-capacity LIFO stack backed by a slice.
 ///
-/// A **down-growing** fixed-capacity LIFO stack.
+/// `DownStack` manages a region of memory as a stack that grows from a high memory
+/// address towards a lower one. This is in contrast to typical stack implementations
+/// that grow upwards. It's designed for scenarios where you need a stack but want to
+/// avoid heap allocations, such as in embedded systems or performance-critical code.
 ///
-/// Layout (high address at the top):
+/// The internal pointers are not dereferenced during operations, which allows for
+/// creating safe aliases to its memory, enabling advanced, unsafe patterns if needed.
+///
+/// # Layout (high address at the top):
 ///
 /// ```text
 ///                    above ┐
 ///                          ▼
 ///   [ x x x x ...free... ][ ...dead space ...]
-///     ▲     ▲            
-///     │     └─ head      
+///     ▲     ▲
+///     │     └─ head
 ///     └──────── end (low addr)
+/// ```
+///
+/// # Example
+///
+/// ```
+/// use frame_mem_utils::stack::{DownStack, make_storage};
+/// use core::mem::MaybeUninit;
+///
+/// let mut storage: [MaybeUninit<i32>; 4] = make_storage();
+/// let mut stack = DownStack::from_slice(&mut storage);
+///
+/// stack.push(10).unwrap();
+/// stack.push(20).unwrap();
+///
+/// assert_eq!(stack.len(), 2);
+/// assert_eq!(stack.pop(), Some(20));
+/// assert_eq!(stack.pop(), Some(10));
+/// assert!(stack.is_empty());
 /// ```
 pub struct DownStack<'mem, T> {
     //the fact rust is missing const makes this make less effishent code than i would like...
@@ -55,7 +77,9 @@ impl<T> Drop for DownStack<'_, T> {
 
 /*──────────────────── constructors ────────────────────*/
 impl<'mem, T> DownStack<'mem, T> {
-    /// Empty stack over an *uninitialised* slice.
+    /// Creates an empty `DownStack` from a given slice of `MaybeUninit<T>`.
+    ///
+    /// The stack will use this slice as its backing storage.
     #[inline]
     pub const fn from_slice(buf: &'mem mut [MaybeUninit<T>]) -> Self {
         let end = buf.as_mut_ptr() as *mut T; // low addr
@@ -168,6 +192,9 @@ impl<'mem, T> DownStack<'mem, T> {
     }
 
     /*──────────────────── push / pop ───────────────────────*/
+    /// Pushes a value onto the top of the stack.
+    ///
+    /// Returns `Err(v)` if the stack is full.
     #[inline]
     pub fn push(&mut self, v: T) -> Result<(), T> {
         if self.room_left() == 0 {
@@ -180,6 +207,9 @@ impl<'mem, T> DownStack<'mem, T> {
         Ok(())
     }
 
+    /// Pops a value from the top of the stack.
+    ///
+    /// Returns `None` if the stack is empty.
     #[inline]
     pub fn pop(&mut self) -> Option<T> {
         if self.write_index() == 0 {
@@ -324,6 +354,7 @@ impl<'mem, T> DownStack<'mem, T> {
         }
     }
 
+    /// Returns a slice containing all elements in the stack, from top to bottom.
     #[inline]
     pub fn peek_all<'b>(&'b self) -> &'b [T] {
         unsafe { slice::from_raw_parts(self.head, self.write_index()) }
@@ -820,6 +851,42 @@ fn test_stacref_set_other_copies_all() {
 
 /*──────────────────── StackVec ────────────────────────────────*/
 
+/// A `Vec`-like implementation on a fixed-size buffer that grows upwards.
+///
+/// `StackVec` provides a familiar `Vec`-like interface for managing a contiguous
+/// array, but it operates on a pre-allocated slice of memory instead of the heap.
+/// It is a LIFO stack that grows from a low memory address towards a higher one.
+///
+/// This is useful for creating dynamic-length collections in environments where
+/// heap allocation is not available or desirable.
+///
+/// # Layout (high address at the top):
+///
+/// ```text
+///   base (low addr)
+///     │
+///     ▼
+///   [ item1, item2, ... itemN, ... free space ... ]
+///                             ▲
+///                             └─ len points here (one-past-end)
+/// ```
+///
+/// # Example
+///
+/// ```
+/// use frame_mem_utils::stack::{StackVec, make_storage};
+/// use core::mem::MaybeUninit;
+///
+/// let mut buffer: [MaybeUninit<u8>; 16] = make_storage();
+/// let mut vec = StackVec::from_slice(&mut buffer);
+///
+/// vec.push(10u8).unwrap();
+/// vec.push_slice(&[20, 30]).unwrap();
+///
+/// assert_eq!(vec.len(), 3);
+/// assert_eq!(vec.peek_all(), &[10, 20, 30]);
+/// assert_eq!(vec.pop(), Some(30));
+/// ```
 pub struct StackVec<'mem, T> {
     base: *mut T,
     len: usize,
@@ -833,6 +900,9 @@ unsafe impl<'m, T: Sync> Sync for StackVec<'m, T> {}
 /*────────── constructors ──────────*/
 
 impl<'mem, T> StackVec<'mem, T> {
+    /// Creates an empty `StackVec` from a given slice of `MaybeUninit<T>`.
+    ///
+    /// The vector will use this slice as its backing storage.
     pub const fn from_slice(buf: &'mem mut [MaybeUninit<T>]) -> Self {
         Self {
             base: buf.as_mut_ptr() as *mut T,
@@ -881,6 +951,7 @@ impl<T> StackVec<'_, T> {
     pub fn is_empty(&self) -> bool {
         self.len == 0
     }
+    /// Returns the number of additional elements the vector can hold.
     #[inline]
     pub fn room_left(&self) -> usize {
         self.capacity - self.len
@@ -890,6 +961,9 @@ impl<T> StackVec<'_, T> {
 /*────────── push / pop ──────────*/
 
 impl<'me, T> StackVec<'me, T> {
+    /// Appends an element to the end of the vector.
+    ///
+    /// Returns `Err(v)` if the vector is full.
     #[inline]
     pub fn push(&mut self, v: T) -> Result<(), T> {
         if self.len == self.capacity {
@@ -902,6 +976,9 @@ impl<'me, T> StackVec<'me, T> {
         Ok(())
     }
 
+    /// Removes the last element from the vector and returns it.
+    ///
+    /// Returns `None` if the vector is empty.
     #[inline]
     pub fn pop(&mut self) -> Option<T> {
         if self.len == 0 {
@@ -1033,6 +1110,7 @@ impl<'me, T> StackVec<'me, T> {
         }
     }
 
+    /// Returns a slice containing all elements in the vector.
     #[inline]
     pub fn peek_all<'b>(&'b self) -> &'b [T] {
         unsafe { slice::from_raw_parts(self.base, self.len) }

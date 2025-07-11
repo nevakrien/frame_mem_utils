@@ -66,3 +66,32 @@ assert_eq!(formatted_str, "Hello, world! The answer is 42.");
 let data = arena.save(12345u64).expect("Failed to save integer");
 assert_eq!(*data, 12345);
 ```
+
+### Using `StackVec`
+
+`StackVec` provides a `Vec`-like API on a fixed-size buffer, growing upwards. It's useful when you need a standard vector-like structure without heap allocation.
+
+```rust
+use frame_mem_utils::stack::{StackVec, make_storage};
+use core::mem::MaybeUninit;
+
+// 1. Create a backing memory buffer on the stack.
+let mut buffer: [MaybeUninit<u8>; 1024] = make_storage();
+
+// 2. Create a StackVec from the buffer.
+let mut vec = StackVec::from_slice(&mut buffer);
+
+// 3. Push some values.
+vec.push(10u8).unwrap();
+vec.push(20).unwrap();
+vec.push_slice(&[30, 40, 50]).unwrap();
+
+// 4. Access elements like a slice.
+assert_eq!(vec.peek_all(), &[10, 20, 30, 40, 50]);
+assert_eq!(vec[1], 20);
+
+// 5. Pop values off the end.
+assert_eq!(vec.pop(), Some(50));
+assert_eq!(&*vec.pop_many(2).unwrap(), &[30,40]);
+assert_eq!(vec.len(), 2);
+```
