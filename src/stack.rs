@@ -11,11 +11,15 @@ use core::ptr;
 use core::slice;
 use core::slice::from_raw_parts_mut;
 
+/// A helper function to create an uninitialized array for backing storage.
+///
+/// This is a convenience function to avoid unsafe code in user code.
 pub fn make_storage<T, const N: usize>() -> [MaybeUninit<T>; N] {
     // SAFETY: MaybeUninit is safe to use uninitialized.
     unsafe { MaybeUninit::uninit().assume_init() }
 }
 
+/// A checkpoint for the stack, allowing to rewind to a previous state.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct StackCheckPoint<T>(*mut T);
 
@@ -43,7 +47,7 @@ pub struct StackCheckPoint<T>(*mut T);
 ///
 /// # Example
 ///
-/// ```
+/// ```rust
 /// use frame_mem_utils::stack::{DownStack, make_storage};
 /// use core::mem::MaybeUninit;
 ///
@@ -92,11 +96,15 @@ impl<'mem, T> DownStack<'mem, T> {
         }
     }
 
-    /// Empty stack over an *uninitialised* slice.
+    /// Creates an empty `DownStack` from a raw pointer to a slice of `MaybeUninit<T>`.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that the pointer is valid for the lifetime `'mem`.
     #[inline]
     pub const fn from_slice_raw(buf: *mut [MaybeUninit<T>]) -> Self {
         let end = buf as *mut T; // low addr
-        let above = unsafe { end.add(buf.len()) }; // one-past high addr
+        let above = unsafe { end.add((*buf).len()) }; // one-past high addr
         Self {
             above,
             head: above,
@@ -105,7 +113,9 @@ impl<'mem, T> DownStack<'mem, T> {
         }
     }
 
-    /// Stack that is **full** (all elements initialised).
+    /// Creates a `DownStack` from a slice of already initialized data.
+    ///
+    /// The stack will be full and all elements will be considered live.
     #[inline]
     pub const fn new_full(buf: &'mem mut [T]) -> Self
     where
@@ -121,7 +131,7 @@ impl<'mem, T> DownStack<'mem, T> {
         }
     }
 
-    /// Convert back to the original uninitialised slice.
+    /// Converts the `DownStack` back into the backing slice.
     #[inline]
     pub fn to_slice(self) -> &'mem mut [MaybeUninit<T>] {
         unsafe {
@@ -132,6 +142,9 @@ impl<'mem, T> DownStack<'mem, T> {
         }
     }
 
+    /// Clones the content of this stack to another `DownStack`.
+    ///
+    /// The other stack will be cleared before the copy.
     pub fn set_other<'b>(&self, other: &mut DownStack<'b, T>) -> Result<(), usize>
     where
         T: Clone,
@@ -144,13 +157,13 @@ impl<'mem, T> DownStack<'mem, T> {
     }
 
     /*──────────────────── invariants ───────────────────────*/
-    /// Number of live elements.
+    /// Returns the number of live elements in the stack.
     #[inline]
     pub fn write_index(&self) -> usize {
         unsafe { self.above.offset_from(self.head) as usize }
     }
 
-    /// Free capacity below `head`.
+    /// Returns the number of available slots in the stack.
     #[inline]
     pub fn room_left(&self) -> usize {
         unsafe { self.head.offset_from(self.end) as usize }
@@ -167,16 +180,19 @@ impl<'mem, T> DownStack<'mem, T> {
         }
     }
 
+    /// Returns the number of elements in the stack.
     #[inline]
     pub fn len(&self) -> usize {
         self.write_index()
     }
 
+    /// Returns `true` if the stack contains no elements.
     #[inline]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
+    /// Returns a raw pointer to the end of the stack's buffer.
     #[inline]
     pub fn get_end(&self) -> *mut T {
         self.end
@@ -222,6 +238,9 @@ impl<'mem, T> DownStack<'mem, T> {
         }
     }
 
+    /// Pushes an array of `N` elements onto the stack.
+    ///
+    /// Returns `Err(arr)` if there is not enough room.
     #[inline]
     pub fn push_n<const N: usize>(&mut self, arr: [T; N]) -> Result<(), [T; N]> {
         if self.room_left() < N {
@@ -234,6 +253,9 @@ impl<'mem, T> DownStack<'mem, T> {
         Ok(())
     }
 
+    /// Pops an array of `N` elements from the stack.
+    ///
+    /// Returns `None` if there are not enough elements.
     #[inline]
     pub fn pop_n<const N: usize>(&mut self) -> Option<[T; N]> {
         if self.write_index() < N {
@@ -246,6 +268,9 @@ impl<'mem, T> DownStack<'mem, T> {
         }
     }
 
+    /// Pushes a slice of elements onto the stack.
+    ///
+    /// Returns `None` if there is not enough room.
     #[inline]
     pub fn push_slice(&mut self, src: &[T]) -> Option<()>
     where
@@ -262,6 +287,9 @@ impl<'mem, T> DownStack<'mem, T> {
         Some(())
     }
 
+    /// Pops `n` elements from the stack and returns them as a `RefBox<[T]>`.
+    ///
+    /// Returns `None` if there are not enough elements.
     #[inline]
     pub fn pop_many<'b>(&'b mut self, n: usize) -> Option<RefBox<'b,[T]>>
     {
@@ -276,7 +304,7 @@ impl<'mem, T> DownStack<'mem, T> {
     }
 
     /*──────────────────── allocs ───────────────────────*/
-    /// flushes elements from the stack
+    /// Removes `len` elements from the top of the stack, calling their destructors.
     #[inline]
     pub fn flush(&mut self, len: usize) -> Option<()> {
         if self.write_index() < len {
@@ -293,7 +321,7 @@ impl<'mem, T> DownStack<'mem, T> {
         }
     }
 
-    /// This frees the memory calling no destructor
+    /// Removes `len` elements from the top of the stack without calling their destructors.
     #[inline]
     pub fn free(&mut self, len: usize) -> Option<()> {
         if self.write_index() < len {
@@ -305,6 +333,8 @@ impl<'mem, T> DownStack<'mem, T> {
         }
     }
 
+    /// Allocates `len` uninitialized elements on the stack.
+    ///
     /// # Safety
     /// Calling this puts invalid memory on the stack.
     /// Using any read operations on it is UB.
@@ -319,23 +349,28 @@ impl<'mem, T> DownStack<'mem, T> {
     }
     /*──────────────────── checkpoint ───────────────────────*/
 
+    /// Creates a checkpoint of the current stack state.
     #[inline]
     pub fn check_point(&self) -> StackCheckPoint<T> {
         StackCheckPoint(self.head)
     }
 
+    /// Rewinds the stack to a previously created checkpoint.
+    ///
     /// # Safety
-    /// nothing points to memory we are currently freeing
+    /// The caller must ensure that no pointers to the freed memory exist.
     #[inline]
     pub unsafe fn goto_checkpoint(&mut self, check_point: StackCheckPoint<T>) {
         self.head = check_point.0;
     }
     /*──────────────────── peek helpers ─────────────────────*/
+    /// Returns a reference to the top element of the stack.
     #[inline]
     pub fn peek<'b>(&'b self) -> Option<&'b T> {
         self.peek_n::<1>().map(|a| &a[0])
     }
 
+    /// Returns a reference to the top `N` elements of the stack.
     #[inline]
     pub fn peek_n<'b, const N: usize>(&'b self) -> Option<&'b [T; N]> {
         if self.write_index() < N {
@@ -345,6 +380,7 @@ impl<'mem, T> DownStack<'mem, T> {
         }
     }
 
+    /// Returns a slice of the top `n` elements of the stack.
     #[inline]
     pub fn peek_many<'b>(&'b self, n: usize) -> Option<&'b [T]> {
         if self.write_index() < n {
@@ -360,12 +396,13 @@ impl<'mem, T> DownStack<'mem, T> {
         unsafe { slice::from_raw_parts(self.head, self.write_index()) }
     }
 
-
+    /// Returns a mutable reference to the top element of the stack.
     #[inline]
     pub fn peek_mut<'b>(&'b mut self) -> Option<&'b mut T> {
         self.peek_n_mut::<1>().map(|a| &mut a[0])
     }
 
+    /// Returns a mutable reference to the top `N` elements of the stack.
     #[inline]
     pub fn peek_n_mut<'b, const N: usize>(&'b mut self) -> Option<&'b mut [T; N]> {
         if self.write_index() < N {
@@ -375,6 +412,7 @@ impl<'mem, T> DownStack<'mem, T> {
         }
     }
 
+    /// Returns a mutable slice of the top `n` elements of the stack.
     #[inline]
     pub fn peek_many_mut<'b>(&'b mut self, n: usize) -> Option<&'b mut [T]> {
         if self.write_index() < n {
@@ -384,11 +422,13 @@ impl<'mem, T> DownStack<'mem, T> {
         }
     }
 
+    /// Returns a mutable slice of all elements in the stack.
     #[inline]
     pub fn peek_all_mut<'b>(&'b mut self) -> &'b mut [T] {
         unsafe { slice::from_raw_parts_mut(self.head, self.write_index()) }
     }
 
+    /// Returns a mutable reference to the element at `n` from the top of the stack.
     #[inline]
     pub fn spot<'b>(&'b mut self, n: usize) -> Option<&'b mut T> {
         if self.write_index() <= n {
@@ -398,6 +438,7 @@ impl<'mem, T> DownStack<'mem, T> {
         }
     }
 
+    /// Returns a raw pointer to the element at `n` from the top of the stack.
     #[inline]
     pub fn spot_raw(&mut self, n: usize) -> Option<*mut T> {
         if self.write_index() <= n {
@@ -426,6 +467,7 @@ impl<'mem, T> DownStack<'mem, T> {
         Some(())
     }
 
+    /// Splits the stack into a slice of its elements and an empty `DownStack`.
     /// (live slice on the left, empty stack on the right)
     #[inline]
     pub fn split<'b>(&'b mut self) -> (&'b mut [T], DownStack<'b, T>) {
@@ -440,6 +482,7 @@ impl<'mem, T> DownStack<'mem, T> {
         (left, right)
     }
 
+    /// Consumes the stack and returns a slice of its elements and an empty `DownStack`.
     #[inline]
     pub fn split_consume(self) -> (&'mem mut [T], DownStack<'mem, T>) {
         let live = self.write_index();
@@ -466,6 +509,7 @@ impl<'mem, T> DownStack<'mem, T> {
         (ptr_live, right)
     }
 
+    /// Returns a raw pointer to the head of the stack.
     #[inline(always)]
     pub fn get_head(&self) -> *mut T {
         self.head
@@ -873,7 +917,7 @@ fn test_stacref_set_other_copies_all() {
 ///
 /// # Example
 ///
-/// ```
+/// ```rust
 /// use frame_mem_utils::stack::{StackVec, make_storage};
 /// use core::mem::MaybeUninit;
 ///
@@ -912,6 +956,9 @@ impl<'mem, T> StackVec<'mem, T> {
         }
     }
 
+    /// Creates a `StackVec` from a slice of already initialized data.
+    ///
+    /// The vector will be full and all elements will be considered live.
     pub const fn new_full(buf: &'mem mut [T]) -> Self
     where
         T: Copy,
@@ -924,10 +971,14 @@ impl<'mem, T> StackVec<'mem, T> {
         }
     }
 
+    /// Converts the `StackVec` back into the backing slice.
     pub fn to_slice(self) -> &'mem mut [MaybeUninit<T>] {
         unsafe { slice::from_raw_parts_mut(self.base as *mut _, self.capacity) }
     }
 
+    /// Clones the content of this vector to another `StackVec`.
+    ///
+    /// The other vector will be cleared before the copy.
     pub fn set_other<'b>(&self, other: &mut StackVec<'b, T>) -> Result<(), usize>
     where
         T: Clone,
@@ -943,10 +994,12 @@ impl<'mem, T> StackVec<'mem, T> {
 /*────────── invariants & meta ──────────*/
 
 impl<T> StackVec<'_, T> {
+    /// Returns the number of elements in the vector.
     #[inline]
     pub fn len(&self) -> usize {
         self.len
     }
+    /// Returns `true` if the vector contains no elements.
     #[inline]
     pub fn is_empty(&self) -> bool {
         self.len == 0
@@ -989,6 +1042,9 @@ impl<'me, T> StackVec<'me, T> {
     }
 
     /*──── bulk helpers ────*/
+    /// Appends an array of `N` elements to the end of the vector.
+    ///
+    /// Returns `Err(arr)` if there is not enough room.
     #[inline]
     pub fn push_n<const N: usize>(&mut self, arr: [T; N]) -> Result<(), [T; N]> {
         if self.room_left() < N {
@@ -1001,6 +1057,9 @@ impl<'me, T> StackVec<'me, T> {
         Ok(())
     }
 
+    /// Pops an array of `N` elements from the end of the vector.
+    ///
+    /// Returns `None` if there are not enough elements.
     #[inline]
     pub fn pop_n<const N: usize>(&mut self) -> Option<[T; N]> {
         if self.len < N {
@@ -1010,7 +1069,9 @@ impl<'me, T> StackVec<'me, T> {
         unsafe { Some((self.base.add(self.len) as *mut [T; N]).read()) }
     }
 
-
+    /// Pops `n` elements from the vector and returns them as a `RefBox<[T]>`.
+    ///
+    /// Returns `None` if there are not enough elements.
     #[inline]
     pub fn pop_many<'b>(&'b mut self, n: usize) -> Option<RefBox<'b,[T]>> {
         if self.len < n {
@@ -1024,6 +1085,9 @@ impl<'me, T> StackVec<'me, T> {
         }
     }
 
+    /// Appends a slice of elements to the end of the vector.
+    ///
+    /// Returns `None` if there is not enough room.
     #[inline]
     pub fn push_slice(&mut self, src: &[T]) -> Option<()>
     where
@@ -1089,6 +1153,7 @@ impl<'me, T> StackVec<'me, T> {
 
     /*────────── peeks & spots ──────────*/
 
+    /// Returns a reference to the last element of the vector.
     #[inline]
     pub fn peek(&self) -> Option<&T> {
         if self.len == 0 {
@@ -1098,6 +1163,7 @@ impl<'me, T> StackVec<'me, T> {
         }
     }
 
+    /// Returns a slice of the last `n` elements of the vector.
     #[inline]
     pub fn peek_many(&self, n: usize) -> Option<&[T]> {
         if self.len < n {
@@ -1116,6 +1182,7 @@ impl<'me, T> StackVec<'me, T> {
         unsafe { slice::from_raw_parts(self.base, self.len) }
     }
 
+    /// Returns a mutable reference to the last element of the vector.
     #[inline]
     pub fn peek_mut(&mut self) -> Option<&mut T> {
         if self.len == 0 {
@@ -1125,6 +1192,7 @@ impl<'me, T> StackVec<'me, T> {
         }
     }
 
+    /// Returns a mutable slice of the last `n` elements of the vector.
     #[inline]
     pub fn peek_many_mut(&mut self, n: usize) -> Option<&mut [T]> {
         if self.len < n {
@@ -1137,6 +1205,7 @@ impl<'me, T> StackVec<'me, T> {
         }
     }
 
+    /// Returns a mutable slice of all elements in the vector.
     #[inline]
     pub fn peek_all_mut<'b>(&'b mut self) -> &'b mut [T] {
         unsafe { slice::from_raw_parts_mut(self.base, self.len) }
@@ -1170,6 +1239,7 @@ impl<'me, T> StackVec<'me, T> {
         Some(unsafe { self.base.add(self.len - 1 - n) })
     }
 
+    /// Returns a raw pointer to the base of the vector's buffer.
     #[inline(always)]
     pub fn get_base(&self) -> *mut T {
         self.base
@@ -1177,6 +1247,7 @@ impl<'me, T> StackVec<'me, T> {
 
     /*────────── split ──────────*/
 
+    /// Splits the vector into a slice of its elements and an empty `StackVec`.
     /// (live slice on the left, empty StackVec on the right)
     #[inline]
     pub fn split<'b>(&'b mut self) -> (&'b mut [T], StackVec<'b, T>) {
@@ -1192,6 +1263,7 @@ impl<'me, T> StackVec<'me, T> {
         (left, right)
     }
 
+    /// Consumes the vector and returns a slice of its elements and an empty `StackVec`.
     #[inline]
     pub fn split_consume(self) -> (&'me mut [T], StackVec<'me, T>) {
         let live = self.len;
@@ -1206,6 +1278,7 @@ impl<'me, T> StackVec<'me, T> {
         (left, right)
     }
 
+    /// Raw pointer to live slice + empty right-hand `StackVec` (no borrow).
     #[inline]
     pub fn split_raw<'b>(&'b mut self) -> (*mut T, StackVec<'b, T>) {
         let live = self.len;
