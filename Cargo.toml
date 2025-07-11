@@ -2,5 +2,10 @@
 name = "frame_mem_utils"
 version = "0.1.0"
 edition = "2024"
+description = "a few stack oriented utileties designed with unsafe in mind"
+license = "Apache-2.0"
+repository = "https://github.com/nevakrien/frame_mem_utils"
+keywords = ["stack","stack_allocation","arena","vector"]
+categories = ["command-line-utilities"]
 
 [dependencies]
