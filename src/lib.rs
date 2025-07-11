@@ -1,9 +1,9 @@
 #![no_std]
 /*!
-This crate provies methods to work with memory allocation without directly calling heap methods. 
+This crate provies methods to work with memory allocation without directly calling heap methods.
 This allows making arenas entirly on the stack and it is up to you to deside where the memory would come from.
 
-all types used are actively avoiding derfrencing their internal pointers which allows making refrences to them elsewhere, 
+all types used are actively avoiding derfrencing their internal pointers which allows making refrences to them elsewhere,
 this allows for some fairly neat things with unsafe code.
 
 # Examples
@@ -96,8 +96,9 @@ assert_eq!(&*vec.pop_many(2).unwrap(), &[30,40]);
 assert_eq!(vec.len(), 2);
 ```
 */
+#[cfg(test)]
 extern crate alloc;
 
+pub mod allocs;
 pub mod refs;
 pub mod stack;
-pub mod allocs;

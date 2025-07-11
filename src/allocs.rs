@@ -1,11 +1,11 @@
-
 // ───────────── STACK ALLOC (untyped, bytes) ────────────────────────────
-use core::slice;
-use core::fmt;
-use core::fmt::Write;
 use crate::refs::RefBox;
 use crate::stack::StackVec;
+use core::fmt;
+use core::fmt::Write;
 use core::mem::MaybeUninit;
+use core::ops::Index;
+use core::slice;
 
 pub struct StackAlloc<'a>(StackVec<'a, u8>);
 
@@ -31,31 +31,28 @@ impl<'lex> StackAlloc<'lex> {
     }
 
     #[inline]
-    pub fn save<T>(&mut self,t:T)->Option<RefBox<'lex,T>> {
-        self.alloc().map(|x| 
-            unsafe{
-                RefBox::new(x.write(t))
-            }
-        )
+    pub fn save<T>(&mut self, t: T) -> Option<RefBox<'lex, T>> {
+        self.alloc().map(|x| unsafe { RefBox::new(x.write(t)) })
     }
 
     #[inline]
-    pub fn save_clone<T:?Sized+Clone>(&mut self,t:&T) -> Option<RefBox<'lex,T>> {
+    pub fn save_refboxed<T>(&mut self, t: RefBox<T>) -> Option<RefBox<'lex, T>> {
         let curr_len = self.0.len();
         let curr_ptr = unsafe { self.0.get_base().add(curr_len) };
 
         let pad = curr_ptr.align_offset(align_of::<T>());
 
-        let total = pad + core::mem::size_of_val(t);
+        let total = pad + core::mem::size_of_val(&*t);
         unsafe {
             self.0.alloc(total)?;
             let slot = curr_ptr.add(pad) as *mut MaybeUninit<T>;
-            Some(RefBox::new((&mut *slot).write(t.clone())))
+            let slot = (&mut *slot).write(t.into_inner());
+            Some(RefBox::new(slot))
         }
     }
 
     #[inline]
-    pub fn save_slice<T:?Sized+Clone>(&mut self,t:&[T]) -> Option<RefBox<'lex,[T]>> {
+    pub fn save_slice<T: Clone>(&mut self, t: &[T]) -> Option<RefBox<'lex, [T]>> {
         let curr_len = self.0.len();
         let curr_ptr = unsafe { self.0.get_base().add(curr_len) };
 
@@ -65,15 +62,14 @@ impl<'lex> StackAlloc<'lex> {
         unsafe {
             self.0.alloc(total)?;
             let slot = curr_ptr.add(pad) as *mut MaybeUninit<T>;
-            let slot: &mut [MaybeUninit<T>] = core::slice::from_raw_parts_mut(slot,t.len());
-            for (s,x) in slot.into_iter().zip(t.iter()){
+            let slot: &mut [MaybeUninit<T>] = core::slice::from_raw_parts_mut(slot, t.len());
+            for (s, x) in slot.into_iter().zip(t.iter()) {
                 s.write(x.clone());
             }
-            let ans = core::slice::from_raw_parts_mut(slot.as_mut_ptr() as *mut T,t.len());
+            let ans = core::slice::from_raw_parts_mut(slot.as_mut_ptr() as *mut T, t.len());
             Some(RefBox::new(ans))
         }
     }
-
 
     #[inline]
     pub fn check_point(&self) -> usize {
@@ -139,7 +135,6 @@ impl<'me, 'lex> StackWriter<'me, 'lex> {
 // ───────────── STACK ALLOC (typed) ─────────────────────────────────────
 pub struct StackAllocator<'a, T>(StackVec<'a, T>);
 
-
 impl<'a, T> StackAllocator<'a, T> {
     #[inline]
     pub const fn new(buf: &'a mut [MaybeUninit<T>]) -> Self {
@@ -172,7 +167,7 @@ impl<'a, T> StackAllocator<'a, T> {
     /// # Safety
     /// the original refrence from save must not exist
     #[inline]
-    pub unsafe fn get(&self, cp: usize) -> Option<&'a [T]> {
+    pub unsafe fn try_index_checkpoint(&self, cp: usize) -> Option<&'a [T]> {
         let live = self.0.len() - cp;
         let addr = self.0.peek_many(live)?.as_ptr().addr();
         let p = self.0.peek_raw()?.with_addr(addr);
@@ -182,10 +177,12 @@ impl<'a, T> StackAllocator<'a, T> {
     /// # Safety
     /// the original refrences from save must not exist
     #[inline]
-    pub unsafe fn index_checkpoint(&self, cp: usize) -> &'a [T] { unsafe {
-        self.get(cp)
-            .expect("checkpoint math is wrong")
-    }}
+    pub unsafe fn index_checkpoint(&self, cp: usize) -> &'a [T] {
+        unsafe {
+            self.try_index_checkpoint(cp)
+                .expect("checkpoint math is wrong")
+        }
+    }
 
     /// # Safety
     /// No live references into the abandoned tail may survive.
@@ -218,12 +215,12 @@ impl<'a, T> StackAllocator<'a, T> {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
-    
-use super::*;
+
+    use super::*;
     use crate::stack::make_storage;
+    use core::mem::ManuallyDrop;
     use core::mem::{MaybeUninit, align_of};
 
     /// Helper: turn the reference we get back into an integer address.
@@ -274,7 +271,7 @@ use super::*;
         assert_eq!(a4 % align_of::<[u64; 3]>(), 0, "array mis-aligned");
 
         /* ── near-exhaustion check: fill what’s left in 8-byte chunks ─ */
-        while let Some(_) = arena.alloc::<u64>(){};
+        while let Some(_) = arena.alloc::<u64>() {}
 
         assert!(arena.alloc::<u64>().is_none(), "OOM must remain OOM");
     }
@@ -348,11 +345,15 @@ use super::*;
         let mut storage = [const { MaybeUninit::uninit() }; 1024];
         let mut alloc = StackAlloc::from_slice(&mut storage);
 
-        let a = alloc.save_slice(&[10,2]).unwrap();
-        let b = alloc.save_clone(&Box::new(20)).unwrap();
+        let a = alloc.save_slice(&[10, 2]).unwrap();
 
-        assert_eq!(&*a, &[10,2]);
+        let mut mem = ManuallyDrop::new(Box::new(20));
+        let b = alloc
+            .save_refboxed(unsafe { RefBox::drop_this(&mut mem) })
+            .unwrap();
         assert_eq!(**b, 20);
+
+        assert_eq!(&*a, &[10, 2]);
 
         let cp = alloc.check_point();
         let c = alloc.save(Box::new(30)).unwrap();
@@ -366,6 +367,125 @@ use super::*;
         // allocation after rollback should overwrite 30
         let d = alloc.save(Box::new(99)).unwrap();
         assert_eq!(*d, Box::new(99));
-
     }
+}
+
+// ───────────── STACK ALLOC (typed) ─────────────────────────────────────
+pub struct Registery<'a, T>(StackVec<'a, T>);
+
+impl<'a, T> Registery<'a, T> {
+    #[inline]
+    pub const fn new(buf: &'a mut [MaybeUninit<T>]) -> Self {
+        Self(StackVec::from_slice(buf))
+    }
+
+    #[inline]
+    pub fn save(&mut self, elem: T) -> Result<(), T> {
+        if size_of::<T>() == 0 {
+            return Ok(());
+        }
+
+        unsafe {
+            match self.0.alloc(1) {
+                None => Err(elem),
+                Some(_) => {
+                    self.0.peek_raw().unwrap_unchecked().write(elem);
+                    Ok(())
+                }
+            }
+        }
+    }
+
+    #[inline]
+    pub fn get(&self, cp: usize) -> Option<&'a T> {
+        unsafe { Some(&*self.0.get_raw(cp)?) }
+    }
+
+    #[inline]
+    pub fn check_point(&self) -> usize {
+        self.0.len()
+    }
+
+    /// get a slice from cp upto the end
+    #[inline]
+    pub fn try_index_checkpoint(&self, cp: usize) -> Option<&'a [T]> {
+        let live = self.0.len() - cp;
+        let addr = self.0.peek_many(live)?.as_ptr().addr();
+        let p = self.0.peek_raw()?.with_addr(addr);
+        unsafe { Some(slice::from_raw_parts(p, live)) }
+    }
+
+    /// get a slice from cp upto the end
+    #[inline]
+    pub fn index_checkpoint(&self, cp: usize) -> &'a [T] {
+        self.try_index_checkpoint(cp)
+            .expect("checkpoint math is wrong")
+    }
+
+    /// # Safety
+    /// No live references into the abandoned tail may survive.
+    #[inline]
+    pub unsafe fn goto_checkpoint(&mut self, cp: usize) {
+        let live = self.0.len() - cp;
+        self.0.flush(live).expect("checkpoint math is wrong"); // drop each value
+    }
+
+    /// # Safety
+    /// this internal stack lets you break all of the allocators assumbtions
+    /// this function should only be used while viewing the code for the allocator itself
+    #[inline(always)]
+    pub unsafe fn get_inner(&mut self) -> &mut StackVec<'a, T> {
+        &mut self.0
+    }
+
+    #[inline(always)]
+    pub fn with_addr(&self, addr: usize) -> *mut T {
+        self.0.get_base().with_addr(addr)
+    }
+
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl<T> Index<usize> for Registery<'_, T> {
+    type Output = T;
+    fn index(&self, id: usize) -> &T {
+        &self.0[id]
+    }
+}
+
+#[test]
+fn test_registert_basic() {
+    use alloc::boxed::Box;
+
+    let mut storage = [const { MaybeUninit::<Box<i32>>::uninit() }; 8];
+    let mut alloc = Registery::new(&mut storage);
+
+    alloc.save(Box::new(10)).unwrap();
+    let a = alloc.get(0).unwrap();
+    alloc.save(Box::new(20)).unwrap();
+    let b = alloc.get(1).unwrap();
+
+    assert_eq!(**a, 10);
+    assert_eq!(**b, 20);
+
+    let cp = alloc.check_point();
+    alloc.save(Box::new(30)).unwrap();
+    let c = alloc.get(2).unwrap();
+    assert_eq!(*c, Box::new(30));
+
+    unsafe {
+        alloc.goto_checkpoint(cp);
+    }
+
+    // allocation after rollback should overwrite 30
+    alloc.save(Box::new(99)).unwrap();
+    let d = alloc.get(2).unwrap();
+    assert_eq!(*d, Box::new(99));
 }

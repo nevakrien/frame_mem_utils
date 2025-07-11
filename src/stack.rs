@@ -75,7 +75,7 @@ unsafe impl<'m, T: Sync> Sync for DownStack<'m, T> {}
 
 impl<T> Drop for DownStack<'_, T> {
     fn drop(&mut self) {
-        while let Some(_) = self.pop(){}
+        while let Some(_) = self.pop() {}
     }
 }
 
@@ -102,7 +102,7 @@ impl<'mem, T> DownStack<'mem, T> {
     ///
     /// The caller must ensure that the pointer is valid for the lifetime `'mem`.
     #[inline]
-    pub const fn from_slice_raw(buf: *mut [MaybeUninit<T>]) -> Self {
+    pub const unsafe fn from_slice_raw(buf: *mut [MaybeUninit<T>]) -> Self {
         let end = buf as *mut T; // low addr
         let above = unsafe { end.add((*buf).len()) }; // one-past high addr
         Self {
@@ -193,7 +193,7 @@ impl<'mem, T> DownStack<'mem, T> {
     }
 
     /// Returns a raw pointer to the end of the stack's buffer.
-    #[inline]
+    #[inline(always)]
     pub fn get_end(&self) -> *mut T {
         self.end
     }
@@ -202,9 +202,39 @@ impl<'mem, T> DownStack<'mem, T> {
     ///# Safety
     /// obviously this is very unsafe and all the underlying memory must be valid
     /// further it needs to be the same allocation
-    #[inline]
+    #[inline(always)]
     pub unsafe fn set_end(&mut self, end: *mut T) {
         self.end = end;
+    }
+
+    /// Returns a raw pointer to the head of the stack.
+    #[inline(always)]
+    pub fn get_head(&self) -> *mut T {
+        self.head
+    }
+
+    /// # Safety
+    /// if head is set outside the allocation (not including 1 above) subsequent ops would be UB
+    /// if head is set below its current possition then reads/writes to these elements from things like pop are UB    
+    /// if head is set above its current position skiped items wont be dropped
+    #[inline(always)]
+    pub unsafe fn set_head(&mut self, head: *mut T) {
+        self.head = head
+    }
+
+    /// Returns a raw pointer to 1 above the stack's buffer.
+    #[inline(always)]
+    pub fn get_above(&self) -> *mut T {
+        self.above
+    }
+
+    ///this is used to manually remove/extend the logical bottom of the stack (phisical top)
+    ///# Safety
+    /// obviously this is very unsafe and all the underlying memory must be valid
+    /// further it needs to be the same allocation
+    #[inline(always)]
+    pub unsafe fn set_above(&mut self, above: *mut T) {
+        self.above = above;
     }
 
     /*──────────────────── push / pop ───────────────────────*/
@@ -291,8 +321,7 @@ impl<'mem, T> DownStack<'mem, T> {
     ///
     /// Returns `None` if there are not enough elements.
     #[inline]
-    pub fn pop_many<'b>(&'b mut self, n: usize) -> Option<RefBox<'b,[T]>>
-    {
+    pub fn pop_many<'b>(&'b mut self, n: usize) -> Option<RefBox<'b, [T]>> {
         if self.write_index() < n {
             return None;
         }
@@ -440,7 +469,7 @@ impl<'mem, T> DownStack<'mem, T> {
 
     /// Returns a raw pointer to the element at `n` from the top of the stack.
     #[inline]
-    pub fn spot_raw(&mut self, n: usize) -> Option<*mut T> {
+    pub fn spot_raw(&self, n: usize) -> Option<*mut T> {
         if self.write_index() <= n {
             None
         } else {
@@ -507,12 +536,6 @@ impl<'mem, T> DownStack<'mem, T> {
             _ph: PhantomData,
         };
         (ptr_live, right)
-    }
-
-    /// Returns a raw pointer to the head of the stack.
-    #[inline(always)]
-    pub fn get_head(&self) -> *mut T {
-        self.head
     }
 }
 /*──────────────────── iterator ─────────────────────────*/
@@ -999,6 +1022,25 @@ impl<T> StackVec<'_, T> {
     pub fn len(&self) -> usize {
         self.len
     }
+
+    /// this is a weird mix of alloc and free it is mainly used for checkpoints
+    /// # Safety
+    /// 1. the length must be in bounds
+    /// 2. if elements are alloced same as alloc
+    pub unsafe fn set_len(&mut self, len: usize) {
+        self.len = len;
+    }
+
+    pub fn capacity(&self) -> usize {
+        self.capacity
+    }
+
+    /// Returns a raw pointer to the base of the vector's buffer.
+    #[inline(always)]
+    pub fn get_base(&self) -> *mut T {
+        self.base
+    }
+
     /// Returns `true` if the vector contains no elements.
     #[inline]
     pub fn is_empty(&self) -> bool {
@@ -1073,7 +1115,7 @@ impl<'me, T> StackVec<'me, T> {
     ///
     /// Returns `None` if there are not enough elements.
     #[inline]
-    pub fn pop_many<'b>(&'b mut self, n: usize) -> Option<RefBox<'b,[T]>> {
+    pub fn pop_many<'b>(&'b mut self, n: usize) -> Option<RefBox<'b, [T]>> {
         if self.len < n {
             None
         } else {
@@ -1117,14 +1159,6 @@ impl<'me, T> StackVec<'me, T> {
         }
         self.len += len;
         Some(())
-    }
-
-    /// this is a weird mix of alloc and free it is mainly used for checkpoints
-    /// # Safety
-    /// 1. the length must be in bounds
-    /// 2. if elements are alloced same as alloc
-    pub unsafe fn set_len(&mut self, len: usize) {
-        self.len = len;
     }
 
     /// Drops `len` values from the top (destructors *run*).
@@ -1232,17 +1266,38 @@ impl<'me, T> StackVec<'me, T> {
 
     /// Raw pointer variant (no lifetime).
     #[inline]
-    pub fn spot_raw(&mut self, n: usize) -> Option<*mut T> {
+    pub fn spot_raw(&self, n: usize) -> Option<*mut T> {
         if n >= self.len {
             return None;
         }
         Some(unsafe { self.base.add(self.len - 1 - n) })
     }
 
-    /// Returns a raw pointer to the base of the vector's buffer.
-    #[inline(always)]
-    pub fn get_base(&self) -> *mut T {
-        self.base
+    /// Mutable ref to the *n*-th value from the start (start==0).
+    #[inline]
+    pub fn get(&self, id: usize) -> Option<&T> {
+        if self.len <= id {
+            return None;
+        }
+        unsafe { Some(&*self.base.add(id)) }
+    }
+
+    /// Mutable ref to the *n*-th value from the start (start==0).
+    #[inline]
+    pub fn get_mut(&mut self, id: usize) -> Option<&mut T> {
+        if self.len <= id {
+            return None;
+        }
+        unsafe { Some(&mut *self.base.add(id)) }
+    }
+
+    /// Pointer to the *n*-th value from the start (start==0).
+    #[inline]
+    pub fn get_raw(&self, id: usize) -> Option<*mut T> {
+        if self.len <= id {
+            return None;
+        }
+        unsafe { Some(self.base.add(id)) }
     }
 
     /*────────── split ──────────*/
