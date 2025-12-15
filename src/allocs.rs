@@ -86,6 +86,11 @@ impl<'lex> StackAlloc<'lex> {
     }
 
     #[inline]
+    pub unsafe fn free(&mut self,n:usize){
+        self.0.free(n);
+    }
+
+    #[inline]
     pub fn len(&self) -> usize {
         self.0.len()
     }

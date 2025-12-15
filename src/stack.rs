@@ -104,7 +104,7 @@ impl<'mem, T> DownStack<'mem, T> {
     #[inline]
     pub const unsafe fn from_slice_raw(buf: *mut [MaybeUninit<T>]) -> Self {
         let end = buf as *mut T; // low addr
-        let above = unsafe { end.add((*buf).len()) }; // one-past high addr
+        let above = unsafe { end.add((buf).len()) }; // one-past high addr
         Self {
             above,
             head: above,
