@@ -17,16 +17,21 @@ impl<'lex> StackAlloc<'lex> {
 
     #[inline]
     pub fn alloc<T>(&mut self) -> Option<&'lex mut MaybeUninit<T>> {
+        Some(&mut self.alloc_many(1)?[0])
+    }
+
+        #[inline]
+    pub fn alloc_many<T>(&mut self,n:usize) -> Option<&'lex mut [MaybeUninit<T>]> {
         let curr_len = self.0.len();
         let curr_ptr = unsafe { self.0.get_base().add(curr_len) };
 
         let pad = curr_ptr.align_offset(align_of::<T>());
 
-        let total = pad + size_of::<T>();
+        let total = pad + n*size_of::<T>();
         unsafe {
             self.0.alloc(total)?;
             let slot = curr_ptr.add(pad) as *mut MaybeUninit<T>;
-            Some(&mut *slot)
+            Some(slice::from_raw_parts_mut(slot,n))
         }
     }
 
@@ -37,32 +42,17 @@ impl<'lex> StackAlloc<'lex> {
 
     #[inline]
     pub fn save_refboxed<T>(&mut self, t: RefBox<T>) -> Option<RefBox<'lex, T>> {
-        let curr_len = self.0.len();
-        let curr_ptr = unsafe { self.0.get_base().add(curr_len) };
-
-        let pad = curr_ptr.align_offset(align_of::<T>());
-
-        let total = pad + core::mem::size_of_val(&*t);
-        unsafe {
-            self.0.alloc(total)?;
-            let slot = curr_ptr.add(pad) as *mut MaybeUninit<T>;
-            let slot = (&mut *slot).write(t.into_inner());
+        unsafe{
+            let slot = self.alloc::<T>()?;
+            let slot = slot.write(t.into_inner());
             Some(RefBox::new(slot))
         }
     }
 
     #[inline]
     pub fn save_slice<T: Clone>(&mut self, t: &[T]) -> Option<RefBox<'lex, [T]>> {
-        let curr_len = self.0.len();
-        let curr_ptr = unsafe { self.0.get_base().add(curr_len) };
-
-        let pad = curr_ptr.align_offset(align_of::<T>());
-
-        let total = pad + core::mem::size_of_val(t);
         unsafe {
-            self.0.alloc(total)?;
-            let slot = curr_ptr.add(pad) as *mut MaybeUninit<T>;
-            let slot: &mut [MaybeUninit<T>] = core::slice::from_raw_parts_mut(slot, t.len());
+            let slot: &mut [MaybeUninit<T>] = self.alloc_many(t.len())?;
             for (s, x) in slot.into_iter().zip(t.iter()) {
                 s.write(x.clone());
             }
@@ -85,6 +75,7 @@ impl<'lex> StackAlloc<'lex> {
         self.0.free(to_free).expect("checkpoint math is wrong");
     }
 
+    /// just frees byes without the aligment padding that was required
     #[inline]
     pub unsafe fn free(&mut self,n:usize){
         self.0.free(n);
@@ -98,6 +89,12 @@ impl<'lex> StackAlloc<'lex> {
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
+
+    #[inline(always)]
+    pub fn with_addr(&self, addr: usize) -> *mut u8 {
+        self.0.get_base().with_addr(addr)
+    }
+
 }
 
 // ───────────── WRITER (printf-style, returns &str) ─────────────────────
